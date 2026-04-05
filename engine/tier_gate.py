@@ -8,8 +8,19 @@ Paid ($19): all findings, all safe-fixes, downloadable report.
 
 The gate filters output, not analysis. The engine always runs
 all checks — the tier controls what the user sees.
+
+License validation: reads CLOUDCUT_LICENSE_KEY from env,
+checks against ~/.cloudcut/licenses.json.
 """
+import json
+import os
+import re
+import logging
+from pathlib import Path
+
 from cloudcut.models.schemas import Finding
+
+logger = logging.getLogger(__name__)
 
 
 class Tier:
@@ -22,6 +33,50 @@ FREE_MAX_FINDINGS = 3
 FREE_SHOW_CLI = True          # show CLI commands even in free
 FREE_ALLOW_FIX = True         # allow safe-fix for the top 3
 FREE_SHOW_SAVINGS_TOTAL = True  # show total potential, not just visible
+
+# License file location
+LICENSES_PATH = Path.home() / ".cloudcut" / "licenses.json"
+
+
+def _load_valid_keys() -> set[str]:
+    """Load valid license keys from ~/.cloudcut/licenses.json.
+
+    File format: {"keys": ["CC-XXXX-XXXX-XXXX", ...]}
+    """
+    if not LICENSES_PATH.exists():
+        return set()
+    try:
+        data = json.loads(LICENSES_PATH.read_text())
+        return set(data.get("keys", []))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to load licenses from %s: %s", LICENSES_PATH, e)
+        return set()
+
+
+LICENSE_FORMAT = re.compile(r"^CC-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$")
+
+
+def validate_license(key: str | None) -> bool:
+    """Check if a license key is valid.
+
+    If ~/.cloudcut/licenses.json exists, validates against that list.
+    Otherwise, accepts any key matching CC-XXXX-XXXX-XXXX format.
+    """
+    if not key:
+        return False
+    key = key.strip()
+    valid_keys = _load_valid_keys()
+    if valid_keys:
+        return key in valid_keys
+    return bool(LICENSE_FORMAT.match(key))
+
+
+def get_current_tier() -> str:
+    """Determine the current tier from CLOUDCUT_LICENSE_KEY env var."""
+    key = os.environ.get("CLOUDCUT_LICENSE_KEY", "").strip()
+    if validate_license(key):
+        return Tier.PAID
+    return Tier.FREE
 
 
 def gate_findings(findings: list[Finding], tier: str) -> tuple[list[Finding], dict]:
@@ -71,7 +126,7 @@ def gate_findings(findings: list[Finding], tier: str) -> tuple[list[Finding], di
         "upgrade_message": (
             f"Showing top {FREE_MAX_FINDINGS} of {total} findings. "
             f"{len(hidden)} more findings worth ${hidden_savings:.2f}/mo "
-            f"available in the full report ($19)."
+            f"available with a license key ($19 at cloudcut.dev)."
         ),
     }
 
@@ -92,7 +147,7 @@ def can_fix_in_tier(finding: Finding, findings: list[Finding], tier: str) -> tup
 
     return False, (
         f"This finding is outside your free tier (top {FREE_MAX_FINDINGS}). "
-        f"Get the full report for $19 to unlock all findings and fixes."
+        f"Get a license key for $19 at cloudcut.dev to unlock all findings and fixes."
     )
 
 
@@ -106,6 +161,6 @@ def format_gate_footer(gate_info: dict) -> str:
         f"💡 {gate_info['upgrade_message']}\n"
         f"   Total potential savings: ${gate_info['total_savings']:.2f}/mo "
         f"(${gate_info['total_savings'] * 12:.2f}/yr)\n"
-        f"   → Get full report: cloudcut.dev/report ($19)\n"
+        f"   → Get license key: cloudcut.dev ($19)\n"
         f"{'─' * 50}"
     )

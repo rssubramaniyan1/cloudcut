@@ -25,6 +25,9 @@ from cloudcut.engine.rules import run_all_checks
 from cloudcut.engine.allowlist import (
     SAFE_FIX_ALLOWLIST, can_fix, build_dry_run_response, _get_fix_command,
 )
+from cloudcut.engine.tier_gate import (
+    get_current_tier, gate_findings, can_fix_in_tier, format_gate_footer,
+)
 from cloudcut.engine.action_log import (
     log_dry_run, log_confirmed, log_failed, log_refused,
     get_session_log, get_total_savings,
@@ -153,15 +156,22 @@ async def run_waste_checks(params: WasteCheckInput, ctx: Context) -> str:
             state["usage"] = usage
         else:
             return "Error: No inventory. Call cloudcut_inventory_aws first."
-    findings = run_all_checks(resources, usage)
-    findings = [f for f in findings if f.confidence_score >= params.min_confidence]
-    state["findings"] = findings
-    total = sum(f.recommendation.estimated_monthly_savings for f in findings)
-    return json.dumps({
-        "total_findings": len(findings),
-        "total_monthly_savings": round(total, 2),
-        "safe_fixable": len([f for f in findings if f.finding_type.value in SAFE_FIX_ALLOWLIST]),
-        "report_only": len([f for f in findings if f.finding_type.value not in SAFE_FIX_ALLOWLIST]),
+    all_findings = run_all_checks(resources, usage)
+    all_findings = [f for f in all_findings if f.confidence_score >= params.min_confidence]
+    state["findings"] = all_findings  # store ALL findings for fix_finding lookup
+
+    tier = get_current_tier()
+    visible, gate_info = gate_findings(all_findings, tier)
+
+    total = gate_info["total_savings"]
+    result = {
+        "tier": gate_info["tier"],
+        "total_findings": gate_info["total_findings"],
+        "visible_findings": gate_info["visible_findings"],
+        "hidden_findings": gate_info["hidden_findings"],
+        "total_monthly_savings": total,
+        "safe_fixable": len([f for f in visible if f.finding_type.value in SAFE_FIX_ALLOWLIST]),
+        "report_only": len([f for f in visible if f.finding_type.value not in SAFE_FIX_ALLOWLIST]),
         "findings": [{
             "priority": i + 1,
             "finding_id": f.finding_id,
@@ -175,8 +185,11 @@ async def run_waste_checks(params: WasteCheckInput, ctx: Context) -> str:
             "safe_fixable": f.finding_type.value in SAFE_FIX_ALLOWLIST,
             "summary": f.summary,
             "cli_command": _get_fix_command(f),
-        } for i, f in enumerate(findings)],
-    }, indent=2)
+        } for i, f in enumerate(visible)],
+    }
+    if gate_info["upgrade_message"]:
+        result["upgrade_message"] = gate_info["upgrade_message"]
+    return json.dumps(result, indent=2)
 
 class ReportInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -184,23 +197,27 @@ class ReportInput(BaseModel):
 
 @mcp.tool(name="cloudcut_generate_report", annotations={"title": "Generate Report", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
 async def generate_report(params: ReportInput, ctx: Context) -> str:
-    """Generate diagnostic report. Findings grouped by: safe-fixable vs report-only. Each includes CLI command."""
+    """Generate diagnostic report. Findings grouped by: safe-fixable vs report-only. Each includes CLI command. Tier gate applied."""
     state = ctx.request_context.lifespan_state
-    findings = state.get("findings", [])
-    if not findings:
+    all_findings = state.get("findings", [])
+    if not all_findings:
         return "Error: No findings. Call cloudcut_run_waste_checks first."
-    total = sum(f.recommendation.estimated_monthly_savings for f in findings)
+
+    tier = get_current_tier()
+    visible, gate_info = gate_findings(all_findings, tier)
+    total = gate_info["total_savings"]
     nr = len(state.get("resources", []))
-    safe = [f for f in findings if f.finding_type.value in SAFE_FIX_ALLOWLIST]
-    report_only = [f for f in findings if f.finding_type.value not in SAFE_FIX_ALLOWLIST]
+    safe = [f for f in visible if f.finding_type.value in SAFE_FIX_ALLOWLIST]
+    report_only = [f for f in visible if f.finding_type.value not in SAFE_FIX_ALLOWLIST]
 
     if params.format == "json":
-        return json.dumps({"resources": nr, "findings": len(findings), "savings": round(total, 2)}, indent=2)
+        return json.dumps({"tier": tier, "resources": nr, "findings": gate_info["visible_findings"], "total_findings": gate_info["total_findings"], "savings": round(total, 2)}, indent=2)
 
     lines = [
         "# CloudCut — AWS Cost Diagnostic Report\n",
+        f"**Tier:** {tier}",
         f"**Resources scanned:** {nr}",
-        f"**Findings:** {len(findings)} ({len(safe)} safe-fixable, {len(report_only)} report-only)",
+        f"**Findings:** {gate_info['visible_findings']} shown ({len(safe)} safe-fixable, {len(report_only)} report-only)",
         f"**Monthly savings:** ${total:,.2f}",
         f"**Annual savings:** ${total * 12:,.2f}\n",
     ]
@@ -216,6 +233,9 @@ async def generate_report(params: ReportInput, ctx: Context) -> str:
         lines.append("*These require manual review. CLI commands provided below.*\n")
         for f in report_only:
             lines.extend(_format_finding_md(f))
+    footer = format_gate_footer(gate_info)
+    if footer:
+        lines.append(footer)
     return "\n".join(lines)
 
 
@@ -248,6 +268,18 @@ async def fix_finding(params: FixInput, ctx: Context) -> str:
     finding = next((f for f in findings if f.finding_id == params.finding_id), None)
     if not finding:
         return f"Error: Finding '{params.finding_id}' not found."
+
+    # Check tier gate
+    tier = get_current_tier()
+    tier_ok, tier_msg = can_fix_in_tier(finding, findings, tier)
+    if not tier_ok:
+        return json.dumps({
+            "status": "BLOCKED — outside free tier",
+            "finding_id": finding.finding_id,
+            "resource_id": finding.resource_id,
+            "reason": tier_msg,
+            "cli_command": _get_fix_command(finding),
+        }, indent=2)
 
     # Check allowlist
     allowed, reason = can_fix(finding)
