@@ -51,6 +51,21 @@ mcp = FastMCP(
 )
 
 
+# ═══ HEALTH / ROOT ROUTE ═══
+
+@mcp.custom_route("/", methods=["GET"])
+async def root(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "service": "cloudcut_mcp",
+        "status": "ok",
+        "version": "0.3.0",
+        "transport": TRANSPORT,
+        "mcp_endpoint": "/mcp",
+        "landing_page": "https://cloudcut.dev",
+    })
+
+
 # ═══ DIAGNOSTIC TOOLS ═══
 
 class InventoryInput(BaseModel):
