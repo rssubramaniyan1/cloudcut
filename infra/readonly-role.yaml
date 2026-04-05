@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudCut — Read-only IAM role for cost diagnostics
+
+Parameters:
+  CloudCutAccountId:
+    Type: String
+    Default: '123456789012'  # Replace with your actual AWS account ID
+    Description: CloudCut's AWS account ID (for cross-account access)
+
+Resources:
+  CloudCutReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CloudCut-ReadOnly
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${CloudCutAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: cloudcut-diagnostic
+      Policies:
+        - PolicyName: CloudCutReadOnlyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Cost Explorer
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                  - ce:GetCostForecast
+                Resource: '*'
+              # EC2 describe only
+              - Effect: Allow
+                Action:
+                  - ec2:Describe*
+                Resource: '*'
+              # RDS describe only
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:ListTagsForResource
+                Resource: '*'
+              # ECS describe only
+              - Effect: Allow
+                Action:
+                  - ecs:ListClusters
+                  - ecs:ListServices
+                  - ecs:ListTasks
+                  - ecs:DescribeServices
+                  - ecs:DescribeTasks
+                  - ecs:DescribeClusters
+                Resource: '*'
+              # Lambda describe only
+              - Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:GetFunction
+                Resource: '*'
+              # CloudWatch metrics (read only)
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              # S3 list only (no object access)
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                  - s3:GetBucketTagging
+                Resource: '*'
+              # ELB describe
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:Describe*
+                Resource: '*'
+              # STS for account info
+              - Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Description: Paste this ARN into CloudCut
+    Value: !GetAtt CloudCutReadOnlyRole.Arn

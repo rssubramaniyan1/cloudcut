@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: cloudcut-mcp
+    runtime: docker
+    plan: starter
+    region: singapore  # closest to ap-south-1
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: CLOUDCUT_TRANSPORT
+        value: http
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /mcp

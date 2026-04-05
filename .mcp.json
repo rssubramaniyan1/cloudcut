@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "cloudcut": {
+      "command": "python",
+      "args": ["-m", "cloudcut.cloudcut_mcp_server"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "AWS_PROFILE": "${env:AWS_PROFILE}",
+        "AWS_REGION": "${env:AWS_REGION:ap-south-1}"
+      }
+    }
+  }
+}
