@@ -37,6 +37,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cloudcut_mcp")
 
 TRANSPORT = os.environ.get("CLOUDCUT_TRANSPORT", "stdio")  # "stdio" or "http"
+API_TOKEN = os.environ.get("CLOUDCUT_API_TOKEN", "")
+
+
+def _require_role_arn(role_arn: str | None) -> str | None:
+    """In HTTP mode, role_arn is mandatory. Returns error string or None."""
+    if TRANSPORT == "http" and not role_arn:
+        return "Error: role_arn is required in remote mode. Local AWS credentials are not available."
+    return None
 
 
 @asynccontextmanager
@@ -76,6 +84,8 @@ class InventoryInput(BaseModel):
 @mcp.tool(name="cloudcut_inventory_aws", annotations={"title": "Inventory AWS Resources", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
 async def inventory_aws(params: InventoryInput, ctx: Context) -> str:
     """Collect AWS resource inventory and 30-day usage metrics via cross-account IAM role. Scans EC2, EBS, EIP, RDS, ECS, Lambda, NAT Gateway."""
+    if err := _require_role_arn(params.role_arn):
+        return err
     state = ctx.request_context.lifespan_state
     try:
         collector = AWSCollector(role_arn=params.role_arn, regions=params.regions)
@@ -100,6 +110,8 @@ class CostInput(BaseModel):
 @mcp.tool(name="cloudcut_analyze_costs", annotations={"title": "Analyze AWS Costs", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
 async def analyze_costs(params: CostInput, ctx: Context) -> str:
     """Pull Cost Explorer data. Returns top spending services with dollar amounts."""
+    if err := _require_role_arn(params.role_arn):
+        return err
     state = ctx.request_context.lifespan_state
     collector = state.get("collector")
     if not collector and params.role_arn:
@@ -128,6 +140,8 @@ class WasteCheckInput(BaseModel):
 @mcp.tool(name="cloudcut_run_waste_checks", annotations={"title": "Run Waste Checks", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True})
 async def run_waste_checks(params: WasteCheckInput, ctx: Context) -> str:
     """Run 5 deterministic waste checks. Each finding includes: resource ID, savings, confidence, CLI command, and whether it's safe-fixable."""
+    if err := _require_role_arn(params.role_arn):
+        return err
     state = ctx.request_context.lifespan_state
     resources = state.get("resources", [])
     usage = state.get("usage", [])
@@ -507,8 +521,36 @@ def _diagnose_error(e):
 
 if __name__ == "__main__":
     if TRANSPORT == "http":
+        import uvicorn
+        from starlette.middleware import Middleware
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse as StarletteJSONResponse
+
+        app = mcp.streamable_http_app()
+
+        if API_TOKEN:
+            inner = app
+
+            async def auth_app(scope, receive, send):
+                if scope["type"] == "http" and scope["path"] != "/":
+                    headers = dict(scope.get("headers", []))
+                    auth_value = headers.get(b"authorization", b"").decode()
+                    if auth_value != f"Bearer {API_TOKEN}":
+                        response = StarletteJSONResponse(
+                            {"error": "Unauthorized", "message": "Valid Bearer token required."},
+                            status_code=401,
+                        )
+                        await response(scope, receive, send)
+                        return
+                await inner(scope, receive, send)
+
+            app = auth_app
+            logger.info("Bearer token auth enabled")
+        else:
+            logger.warning("CLOUDCUT_API_TOKEN not set — HTTP transport has no auth!")
+
         logger.info("Starting CloudCut MCP server (streamable-http on port %s)", mcp.settings.port)
-        mcp.run(transport="streamable-http")
+        uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port, log_level="info")
     else:
         logger.info("Starting CloudCut MCP server (stdio)")
         mcp.run(transport="stdio")
