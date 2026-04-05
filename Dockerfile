@@ -2,10 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt mcp
+COPY requirements.txt /app/cloudcut/
+RUN pip install --no-cache-dir -r /app/cloudcut/requirements.txt mcp
 
-COPY . .
+COPY . /app/cloudcut/
 
 ENV CLOUDCUT_TRANSPORT=http
 ENV PORT=8000
